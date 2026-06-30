@@ -1,0 +1,13 @@
+{
+  "bellStyle": "none",
+  "commandline": "C:\\Program Files\\Git\\bin\\bash.exe --login -i",
+  "guid": "{26cdd2fd-9ecd-45b7-98b9-57059458d2b4}",
+  "icon": "C:\\Program Files\\Git\\mingw64\\share\\git\\git-for-windows.ico",
+  "name": "Git Bash",
+  "startingDirectory": null,
+  "experimental.rendering.forceFullRepaint": false,
+  "antialiasingMode": "cleartype",
+  "padding": "0, 0, 0, 0",
+  "snapOnInput": true,
+  "useAcrylic": true
+}
