@@ -1,0 +1,14 @@
+# Disable annoying system beeps on double tabs
+set bell-style none
+
+# Case-insensitive tab completion (typing 'cd doc' matches 'Documents')
+set completion-ignore-case on
+
+# Show all completion matches immediately without asking "Display all 150 possibilities?"
+set completion-query-items -1
+
+# Mark symlinks to directories with a trailing slash for clarity
+set mark-symlinked-directories on
+
+# Speed up Windows filesystem reads by disabling heavy file-type coloring in the background
+set visible-stats off
