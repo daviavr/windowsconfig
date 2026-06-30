@@ -1,0 +1,5 @@
+bleopt complete_auto_delay=68
+bleopt complete_auto_complete=1
+bleopt complete_ambiguous=menu
+
+#bleopt complete_menu_style=desc
