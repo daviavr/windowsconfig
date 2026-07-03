@@ -24,23 +24,25 @@ if [ "$(git config --global core.fscache)" != "true" ]; then
     git config --global core.fscache true
 fi
 
-# 4. Enable Parallel Checkout Workers (Uses 4 threads)
+# 4. Force git to use git native fs monitor
+if [ "$(git config --global core.useBuiltinFSMonitor)" != "true" ]; then
+    echo "Updating core.useBuiltinFSMonitor to true"
+    git config --global core.useBuiltinFSMonitor true 
+fi
+
+# 5. Increasing checkout workers
 if [ "$(git config --global checkout.workers)" != "4" ]; then
     echo "Updating checkout.workers to 4"
     git config --global checkout.workers 4
 fi
 
-# 5. Optimize History & Commit Graphs
-if [ "$(git config --global core.commitgraph)" != "true" ]; then
-    echo "Updating core.commitgraph to true"
-    git config --global core.commitgraph true
-fi
-if [ "$(git config --global fetch.writeCommitGraph)" != "true" ]; then
-    echo "Updating fetch.writeCommitGraph to true"
-    git config --global fetch.writeCommitGraph true
+# 6. Updating checkout workers threshold
+if [ "$(git config --global checkout.threshold)" != "1000" ]; then
+    echo "Updating checkout.threshold to 1000"
+    git config --global checkout.threshold 1000
 fi
 
-# 6. Check if inside a local repository to run repo-specific tweaks
+# 7. Check if inside a local repository to run repo-specific tweaks
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "Running repository-specific optimizations..."
     git commit-graph write --reachable --changed-paths
