@@ -12,3 +12,5 @@ set mark-symlinked-directories on
 
 # Speed up Windows filesystem reads by disabling heavy file-type coloring in the background
 set visible-stats off
+
+set show-all-if-ambiguous on
