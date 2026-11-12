@@ -1,0 +1,7 @@
+#compdef nelojira
+
+_nelojira_completion() {
+  eval $(env _TYPER_COMPLETE_ARGS="${words[1,$CURRENT]}" _NELOJIRA_COMPLETE=complete_zsh nelojira)
+}
+
+compdef _nelojira_completion nelojira

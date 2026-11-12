@@ -1,0 +1,19 @@
+# completion
+zsh-users/zsh-completions kind:fpath path:src
+
+# keybindings
+mattmc3/zephyr path:plugins/editor
+
+# history
+mattmc3/zephyr path:plugins/history
+
+# colors
+mattmc3/zephyr path:plugins/color
+
+# prompt
+romkatv/powerlevel10k
+
+# fish like utilities
+zsh-users/zsh-autosuggestions
+# lags # zdharma-continuum/fast-syntax-highlighting
+# lags # zsh-users/zsh-history-substring-search

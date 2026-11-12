@@ -1,0 +1,48 @@
+[maintenance]
+	strategy = incremental
+[diff]
+	ignoreSubmodules = dirty
+[interactive]
+    	diffFilter = delta --color-only
+[delta]
+    	navigate = true  # use n and N to move between diff sections
+    	dark = true      # or light = true, or omit for auto-detection
+#    	side-by-side = true
+    	line-numbers = true
+[merge]
+    	conflictStyle = zdiff3
+[core]
+	pager = delta
+	excludesfile = ~/.gitignore
+	fscache = true
+	fsmonitor = false
+	editor = nvim
+	autocrlf = true
+	untrackedCache = true
+	preloadIndex = true
+[feature]
+	manyFiles = true
+[index]
+	threads = true
+	version = 4
+[status]
+	aheadBehind = false
+[pack]
+	threads = 0
+	windowMemory = 512m
+	compression = 1
+[fetch]
+	parallel = 8
+	writeCommitGraph = true
+	negotiationAlgorithm = skipping
+[remote "origin"]
+	tagOpt = --no-tags
+[checkout]
+	workers = 0
+	thresholdForParallelism = 100
+[push]
+	autoSetupRemote = true
+[protocol]
+	version = 2
+[submodule]
+	fetchJobs = 8
