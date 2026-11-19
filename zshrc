@@ -62,6 +62,41 @@ _zcompdir=$HOME/.zsh/completions
 [[ -d $_zcompdir ]] || mkdir -p $_zcompdir
 fpath=($_zcompdir $_zfunc $fpath)
 
+# Completion digest: every completion function on $fpath compiled into one .zwc that
+# goes first in $fpath. Without it each autoload searches ~30 fpath dirs at 3 stat()s a
+# miss, which costs ~30 ms in compinit and ~40 ms more on the first Tab.
+# The digest's compinit is also patched: the stock one runs `bindkey '^i' | read` (a
+# fork, ~50 ms) on every start, though the result only matters when the completer
+# style includes _expand. The patch checks that style first and forks only then.
+# Rebuilt in the background (~5 s) when a completion dir or the plugin bundle changes.
+# After `antidote update` or a PortableGit upgrade, delete the .zwc to pick up changes.
+_zdigest=${XDG_CACHE_HOME:-$HOME/.cache}/zsh/completion.zwc
+if [[ ! -r $_zdigest || $_zcompdir -nt $_zdigest || $_zfunc -nt $_zdigest ||
+      ${ZDOTDIR:-$HOME}/.zsh_plugins.zsh -nt $_zdigest ]]; then
+  (
+    setopt extended_glob
+    zmodload -F zsh/files b:zf_mkdir b:zf_mv b:zf_rm || exit
+    typeset -A seen; typeset -a files; typeset d f src new tmp=${_zdigest:r}.$$.zwc
+    for d in $fpath; do
+      for f in $d/(_[^.]#|compinit|compaudit|compdump|compinstall)(N.); do
+        (( $+seen[${f:t}] )) && continue
+        seen[${f:t}]=1; files+=$f
+      done
+    done
+    zf_mkdir -p ${_zdigest:h}
+    if f=$files[(r)*/compinit] && [[ -n $f ]]; then
+      src="$(<$f)"
+      new=${src/$'\n'"bindkey '^i' |"/$'\n'"zstyle -m ':completion:' completer _expand && bindkey '^i' |"}
+      if [[ $new != $src ]]; then
+        print -r -- $new >| ${_zdigest:h}/compinit
+        files[${files[(i)$f]}]=${_zdigest:h}/compinit
+      fi
+    fi
+    zcompile -Uz $tmp $files && zf_mv -f $tmp $_zdigest || zf_rm -f $tmp
+  ) &>/dev/null &!
+fi
+[[ -r $_zdigest ]] && fpath=($_zdigest $fpath)
+
 autoload -Uz compinit
 _zcompdump=${ZDOTDIR:-$HOME}/.zcompdump
 # `compinit -C` never notices new completion files on its own, so rebuild the dump
@@ -69,7 +104,7 @@ _zcompdump=${ZDOTDIR:-$HOME}/.zcompdump
 [[ $_zcompdir -nt $_zcompdump ]] && rm -f -- $_zcompdump $_zcompdump.zwc
 compinit -C -d $_zcompdump
 [[ $_zcompdump.zwc -nt $_zcompdump ]] || zcompile -R -- $_zcompdump.zwc $_zcompdump
-unset _zcompdir _zcompdump _zfunc
+unset _zcompdir _zcompdump _zfunc _zdigest
 
 zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}' 'r:|[._-]=* r:|=*' 'l:|=* r:|=*'
 zstyle ':completion:*' special-dirs true
@@ -112,4 +147,5 @@ function fast-clear-screen {
 }
 zle -N fast-clear-screen
 bindkey '^L' fast-clear-screen
+
 #zprof
