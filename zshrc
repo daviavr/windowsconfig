@@ -57,10 +57,9 @@ unset ZSH_AUTOSUGGEST_USE_ASYNC   # plain synchronous suggestions: no fork per k
 # Runs after the bundle so zsh-completions' fpath entry is actually seen.
 # Custom completions: drop `_command` files into ~/.zsh/completions, e.g.
 #   glab completion -s zsh >| ~/.zsh/completions/_glab
-_zfunc=$HOME/.zfunc
 _zcompdir=$HOME/.zsh/completions
 [[ -d $_zcompdir ]] || mkdir -p $_zcompdir
-fpath=($_zcompdir $_zfunc $fpath)
+fpath=($_zcompdir $fpath)
 
 # Completion digest: every completion function on $fpath compiled into one .zwc that
 # goes first in $fpath. Without it each autoload searches ~30 fpath dirs at 3 stat()s a
@@ -71,7 +70,7 @@ fpath=($_zcompdir $_zfunc $fpath)
 # Rebuilt in the background (~5 s) when a completion dir or the plugin bundle changes.
 # After `antidote update` or a PortableGit upgrade, delete the .zwc to pick up changes.
 _zdigest=${XDG_CACHE_HOME:-$HOME/.cache}/zsh/completion.zwc
-if [[ ! -r $_zdigest || $_zcompdir -nt $_zdigest || $_zfunc -nt $_zdigest ||
+if [[ ! -r $_zdigest || $_zcompdir -nt $_zdigest ||
       ${ZDOTDIR:-$HOME}/.zsh_plugins.zsh -nt $_zdigest ]]; then
   (
     setopt extended_glob
@@ -104,7 +103,7 @@ _zcompdump=${ZDOTDIR:-$HOME}/.zcompdump
 [[ $_zcompdir -nt $_zcompdump ]] && rm -f -- $_zcompdump $_zcompdump.zwc
 compinit -C -d $_zcompdump
 [[ $_zcompdump.zwc -nt $_zcompdump ]] || zcompile -R -- $_zcompdump.zwc $_zcompdump
-unset _zcompdir _zcompdump _zfunc _zdigest
+unset _zcompdir _zcompdump _zdigest
 
 zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}' 'r:|[._-]=* r:|=*' 'l:|=* r:|=*'
 zstyle ':completion:*' special-dirs true
