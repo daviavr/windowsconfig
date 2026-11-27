@@ -1,0 +1,336 @@
+#!/usr/bin/env bash
+#
+# Opens the current project's .groupproj in the Delphi IDE.
+# Reuses an already running IDE, or starts a new one if none is open.
+#
+# Usage: ide [-n|--new] [name-filter]
+#   -n, --new    open the project in a new IDE even when one is already open
+#   name-filter  optional substring to pick one .groupproj when there are several
+
+set -euo pipefail
+
+new_ide=false
+filter=""
+for arg in "$@"; do
+    case "$arg" in
+        -n|--new) new_ide=true ;;
+        -*)
+            echo "Unknown option: $arg" >&2
+            echo "Usage: ide [-n|--new] [name-filter]" >&2
+            exit 1
+            ;;
+        *) filter="$arg" ;;
+    esac
+done
+
+# Search from the repository root when inside one, otherwise from the current dir
+root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+
+mapfile -t projects < <(find "$root" -maxdepth 3 -type f -iname "*${filter}*.groupproj" -not -path '*/.git/*' | sort)
+
+if [ "${#projects[@]}" -eq 0 ]; then
+    echo "No .groupproj found under $root" >&2
+    exit 1
+fi
+
+if [ "${#projects[@]}" -gt 1 ]; then
+    echo "Multiple .groupproj files found, pass a name filter:" >&2
+    printf '  %s\n' "${projects[@]}" >&2
+    exit 1
+fi
+
+project=$(cygpath -w "${projects[0]}")
+echo "Opening $project"
+
+# Everything is launched through explorer.exe rather than directly: a process
+# started from here inherits this shell's environment (MSYS variables, rewritten
+# PATH, rsvars leftovers), and the IDE then fails to regenerate its
+# environment.proj. Launched by Explorer, the IDE gets the normal desktop
+# environment instead. explorer.exe always exits with 1, so its exit code is
+# meaningless.
+
+bds='C:\Program Files (x86)\Embarcadero\Studio\20.0\bin\bds.exe'
+lean_profile='BDSLean'   # built by delphi-lean-profile.ps1
+
+# The user's own temp folder. $TMP/$TMPDIR are not used on purpose: in some
+# shells they point at C:\Windows\Temp.
+tmp_dir="$(cygpath -u "$LOCALAPPDATA")/Temp"
+
+ide_running() {
+    tasklist //FI "IMAGENAME eq bds.exe" //NH 2>/dev/null | grep -qi '^bds\.exe'
+}
+
+lean_profile_exists() {
+    reg query "HKCU\\Software\\Embarcadero\\$lean_profile\\20.0" >/dev/null 2>&1
+}
+
+# Process ids of the IDEs that are open right now, comma separated.
+ide_pids() {
+    tasklist //FI "IMAGENAME eq bds.exe" //NH //FO CSV 2>/dev/null \
+        | { grep -i '^"bds\.exe"' || true; } | cut -d'"' -f4 | paste -sd, -
+}
+
+# Opens the project in a running IDE and makes sure it actually arrived. An IDE
+# that is still starting (or still loading another project) silently drops the
+# "open this file" request, and nothing signals when it starts accepting them.
+# So instead of guessing a delay: wait for the main window (class TAppBuilder),
+# hand the file over, then watch the window caption - it names the open
+# project - and hand it over again until it shows this project.
+#
+# Without an argument the project goes to whichever IDE is open, handed over
+# like a double-click. With an argument - the process ids of the IDEs that were
+# open before a new one was started - it goes to that new IDE only, so the
+# other IDEs keep their projects.
+#
+# Returns 0 when the project is open, 1 when that could not be confirmed,
+# 2 when the IDE went away or never showed up, 3 when the window helper could
+# not be built.
+open_in_running_ide() {
+    local script
+    script="$tmp_dir/ide-open.ps1"
+    cat > "$script" <<'EOF'
+param([string]$Project, [string]$KnownPids = '')
+$source = @'
+using System;
+using System.Text;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public static class IdeWindow {
+    delegate bool EnumProc(IntPtr hwnd, IntPtr lparam);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc callback, IntPtr lparam);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr hwnd, StringBuilder name, int max);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int max);
+
+    // captions of the visible IDE main windows (empty when none is on screen
+    // yet); pid 0 = of every IDE, otherwise only of that process
+    public static string[] Captions(uint pid) {
+        var result = new List<string>();
+        EnumWindows((hwnd, lparam) => {
+            var name = new StringBuilder(64);
+            GetClassName(hwnd, name, 64);
+            if (name.ToString() == "TAppBuilder" && IsWindowVisible(hwnd)) {
+                uint owner;
+                GetWindowThreadProcessId(hwnd, out owner);
+                if (pid == 0 || owner == pid) {
+                    var text = new StringBuilder(1024);
+                    GetWindowText(hwnd, text, 1024);
+                    result.Add(text.ToString());
+                }
+            }
+            return true;
+        }, IntPtr.Zero);
+        return result.ToArray();
+    }
+
+    // DDE, to talk to one particular IDE. A double-click cannot choose: with
+    // several IDEs open the file lands in any of them. Every IDE runs a DDE
+    // server "bds", topic "system", that takes the same [open("file")] command
+    // the file association uses, and each conversation tells which process
+    // answered it.
+    delegate IntPtr DdeCallback(uint type, uint fmt, IntPtr conv, IntPtr hsz1, IntPtr hsz2, IntPtr data, UIntPtr data1, UIntPtr data2);
+    [StructLayout(LayoutKind.Sequential)] struct QOS { public uint Length; public int Level; public byte Tracking; public byte EffectiveOnly; }
+    [StructLayout(LayoutKind.Sequential)] struct CONVCONTEXT { public uint cb; public uint wFlags; public uint wCountryID; public int iCodePage; public uint dwLangID; public uint dwSecurity; public QOS qos; }
+    [StructLayout(LayoutKind.Sequential)] struct CONVINFO {
+        public uint cb; public IntPtr hUser; public IntPtr hConvPartner; public IntPtr hszSvcPartner; public IntPtr hszServiceReq;
+        public IntPtr hszTopic; public IntPtr hszItem; public uint wFmt; public uint wType; public uint wStatus; public uint wConvst;
+        public uint wLastError; public IntPtr hConvList; public CONVCONTEXT ConvCtxt; public IntPtr hwnd; public IntPtr hwndPartner;
+    }
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern uint DdeInitializeW(ref uint inst, DdeCallback callback, uint cmd, uint reserved);
+    [DllImport("user32.dll")] static extern bool DdeUninitialize(uint inst);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr DdeCreateStringHandleW(uint inst, string text, int codePage);
+    [DllImport("user32.dll")] static extern IntPtr DdeConnectList(uint inst, IntPtr service, IntPtr topic, IntPtr list, IntPtr context);
+    [DllImport("user32.dll")] static extern IntPtr DdeQueryNextServer(IntPtr list, IntPtr previous);
+    [DllImport("user32.dll")] static extern uint DdeQueryConvInfo(IntPtr conv, uint transaction, ref CONVINFO info);
+    [DllImport("user32.dll")] static extern IntPtr DdeClientTransaction(byte[] data, uint size, IntPtr conv, IntPtr item, uint fmt, uint type, uint timeoutMs, out uint result);
+    [DllImport("user32.dll")] static extern bool DdeDisconnectList(IntPtr list);
+    [DllImport("user32.dll")] static extern uint DdeGetLastError(uint inst);
+    static DdeCallback callback = (type, fmt, conv, hsz1, hsz2, data, data1, data2) => IntPtr.Zero;
+
+    // Tells the IDE with this process id to open the file.
+    // 0 = it took the command, 1 = it is not reachable (yet), 2 = it refused
+    public static int Open(uint pid, string file) {
+        uint inst = 0;
+        if (DdeInitializeW(ref inst, callback, 0x10 /* client only */, 0) != 0) return 2;
+        try {
+            IntPtr service = DdeCreateStringHandleW(inst, "bds", 1200);
+            IntPtr topic = DdeCreateStringHandleW(inst, "system", 1200);
+            IntPtr list = DdeConnectList(inst, service, topic, IntPtr.Zero, IntPtr.Zero);
+            if (list == IntPtr.Zero) return 1;
+            try {
+                IntPtr conv = IntPtr.Zero;
+                while ((conv = DdeQueryNextServer(list, conv)) != IntPtr.Zero) {
+                    var info = new CONVINFO();
+                    info.cb = (uint)Marshal.SizeOf(typeof(CONVINFO));
+                    if (DdeQueryConvInfo(conv, 0xFFFFFFFF /* the conversation itself */, ref info) == 0) continue;
+                    uint owner;
+                    GetWindowThreadProcessId(info.hwndPartner, out owner);
+                    if (owner != pid) continue;
+                    byte[] command = Encoding.Unicode.GetBytes("[open(\"" + file + "\")]\0");
+                    uint result;
+                    if (DdeClientTransaction(command, (uint)command.Length, conv, IntPtr.Zero, 0, 0x4050 /* execute */, 60000, out result) != IntPtr.Zero) return 0;
+                    // no answer in time: the IDE has the command and is busy with it
+                    return DdeGetLastError(inst) == 0x4005 ? 0 : 2;
+                }
+                return 1;
+            } finally { DdeDisconnectList(list); }
+        } finally { DdeUninitialize(inst); }
+    }
+}
+'@
+# Add-Type compiles through %TEMP%/%TMP%. When those point at C:\Windows\Temp
+# (as they do in some shells) the compiler cannot read its own source file,
+# so point them at the user's temp folder for this process.
+$env:TEMP = $env:TMP = Join-Path $env:LOCALAPPDATA 'Temp'
+try { Add-Type -TypeDefinition $source -ErrorAction Stop }
+catch { Write-Host "ide: window helper failed to compile: $($_.Exception.Message)"; exit 3 }
+
+# The caption reads "<active project> - Delphi 10.3 - <active file>", so the
+# project is open when it starts with one of the group's projects or mentions
+# the group file itself.
+$fileName = [IO.Path]::GetFileName($Project)
+$names = @([IO.Path]::GetFileNameWithoutExtension($Project))
+foreach ($m in [regex]::Matches((Get-Content -LiteralPath $Project -Raw), 'Include="([^"]+)\.dproj"', 'IgnoreCase')) {
+    $names += [IO.Path]::GetFileName($m.Groups[1].Value)
+}
+# The IDE to use: 0 = whichever is open. With -KnownPids it is the one that
+# was just started, the bds.exe that is not in that list.
+$target = 0
+$known = @($KnownPids -split ',' | Where-Object { $_ } | ForEach-Object { [int]$_ })
+if ($known.Count -gt 0) {
+    $startBy = (Get-Date).AddSeconds(30)
+    while ($target -eq 0) {
+        $fresh = @(Get-Process bds -ErrorAction SilentlyContinue | Where-Object { $known -notcontains $_.Id })
+        if ($fresh.Count -gt 0) { $target = $fresh[0].Id; break }
+        if ((Get-Date) -ge $startBy) { exit 2 }
+        Start-Sleep -Milliseconds 200
+    }
+}
+
+function Test-IdeAlive {
+    if ($target -ne 0) { return [bool](Get-Process -Id $target -ErrorAction SilentlyContinue) }
+    return [bool](Get-Process bds -ErrorAction SilentlyContinue)
+}
+
+function Test-ProjectOpen {
+    foreach ($caption in [IdeWindow]::Captions($target)) {
+        if ($caption.IndexOf($fileName, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+        foreach ($name in $names) {
+            if ($caption.StartsWith("$name - ", [StringComparison]::OrdinalIgnoreCase)) { return $true }
+        }
+    }
+    return $false
+}
+
+# Hands the project over; $true when the IDE got it.
+function Send-Project {
+    if ($target -ne 0) { return ([IdeWindow]::Open($target, $Project) -eq 0) }
+    Start-Process explorer.exe -ArgumentList "`"$Project`""
+    return $true
+}
+
+$resendAfterSec = 6     # hand the file over again when the caption has not changed by then
+$deadline = (Get-Date).AddSeconds(180)
+
+while ([IdeWindow]::Captions($target).Count -eq 0) {
+    if (-not (Test-IdeAlive)) { exit 2 }
+    if ((Get-Date) -ge $deadline) { exit 1 }
+    Start-Sleep -Milliseconds 200
+}
+
+while ((Get-Date) -lt $deadline) {
+    # not taken (the IDE is not listening yet): try again shortly
+    if (Send-Project) { $retryAt = (Get-Date).AddSeconds($resendAfterSec) }
+    else { $retryAt = (Get-Date).AddMilliseconds(500) }
+    while ((Get-Date) -lt $retryAt) {
+        Start-Sleep -Milliseconds 200
+        if (Test-ProjectOpen) { exit 0 }
+        if (-not (Test-IdeAlive)) { exit 2 }
+    }
+}
+exit 1
+EOF
+    local args=("$project")
+    if [ -n "${1:-}" ]; then
+        args+=("$1")
+    fi
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$script")" "${args[@]}"
+}
+
+# Starts an IDE: on the lean profile (unused packages disabled) when that
+# exists, otherwise on the normal one.
+start_ide() {
+    # Explorer cannot pass arguments, so they go into a throwaway shortcut.
+    # The project is not passed here: the IDE does not open it from its command
+    # line, it is handed over once the main window is up (open_in_running_ide).
+    local lnk ide_args
+    lnk="$(cygpath -w "$tmp_dir")\ide-launch.lnk"
+    ide_args="-pDelphi -np"
+    if lean_profile_exists; then
+        ide_args="$ide_args -r$lean_profile"
+    fi
+    IDE_LNK="$lnk" IDE_BDS="$bds" IDE_ARGS="$ide_args" \
+        powershell.exe -NoProfile -Command '
+            $s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:IDE_LNK)
+            $s.TargetPath = $env:IDE_BDS
+            $s.Arguments = $env:IDE_ARGS
+            $s.Save()'
+    explorer.exe "$lnk" || true
+}
+
+# Opens the file like a double-click. The association hands it to bdsLauncher,
+# which passes it to the running IDE via DDE, or launches bds.exe on the normal
+# profile when none is open.
+open_by_association() {
+    explorer.exe "$project" || true
+}
+
+if $new_ide && ide_running; then
+    # A new IDE next to the open ones. The project is sent to that IDE alone;
+    # when that fails it is not handed over like a double-click instead, since
+    # that could replace the project in one of the other IDEs.
+    known_pids=$(ide_pids)
+    start_ide
+    rc=0
+    open_in_running_ide "$known_pids" || rc=$?
+    if [ "$rc" -eq 1 ]; then
+        echo "Could not confirm that the new IDE opened the project" >&2
+    elif [ "$rc" -eq 2 ]; then
+        echo "The new IDE did not start, or closed before the project could be opened" >&2
+    elif [ "$rc" -eq 3 ]; then
+        echo "The new IDE was started, but the project could not be sent to it" >&2
+    fi
+    exit "$rc"
+fi
+
+if ! ide_running && lean_profile_exists; then
+    # No IDE open: start one on the lean profile (unused packages disabled)
+    # and wait for its process to show up.
+    start_ide
+    for _ in $(seq 1 100); do
+        ide_running && break
+        sleep 0.2
+    done
+    if ! ide_running; then
+        echo "The IDE did not start" >&2
+        exit 1
+    fi
+fi
+
+if ide_running; then
+    rc=0
+    open_in_running_ide || rc=$?
+    if [ "$rc" -eq 1 ]; then
+        echo "Could not confirm that the IDE opened the project" >&2
+    elif [ "$rc" -eq 2 ]; then
+        echo "The IDE closed before the project could be opened" >&2
+    elif [ "$rc" -eq 3 ]; then
+        # Cannot watch the IDE window: fall back to a single hand-over.
+        open_by_association
+    fi
+    exit "$rc"
+fi
+
+# No IDE and no lean profile: a plain double-click starts the normal IDE.
+open_by_association
